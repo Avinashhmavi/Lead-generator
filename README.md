@@ -1,5 +1,5 @@
 ```markdown
-##  Lead Analyzer 🚀
+#  Lead Analyzer 🚀
 
 AI-powered lead scoring and email generation platform using Groq's large language models.
 
