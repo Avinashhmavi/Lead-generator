@@ -1,0 +1,9 @@
+from xgboost import XGBRegressor
+import numpy as np
+
+# Create sample model
+model = XGBRegressor()
+X = np.random.rand(100, 3) * 1000  # TV, Radio, Newspaper
+y = X.sum(axis=1) * np.random.normal(1, 0.1, 100)
+model.fit(X, y)
+model.save_model("xgb_model.json")
