@@ -155,8 +155,7 @@ def main():
 
     # --- Sidebar ---
     with st.sidebar:
-        st.image("https://groq.com/favicon.ico", width=60)
-        st.title("🚀 Groq Lead Analyzer")
+        st.title("🚀📈 Lead Analyzer")
         st.markdown("---")
         show_features()
         st.markdown("---")
