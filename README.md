@@ -1,7 +1,9 @@
 ```markdown
-# Groq Lead Analyzer 🚀
+##  Lead Analyzer 🚀
 
 AI-powered lead scoring and email generation platform using Groq's large language models.
+
+**Live Demo**: [https://lead-generator1.streamlit.app/](https://lead-generator1.streamlit.app/)
 
 ## Features 🌟
 
@@ -16,8 +18,8 @@ AI-powered lead scoring and email generation platform using Groq's large languag
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/groq-lead-analyzer.git
-cd groq-lead-analyzer
+git clone https://github.com/Avinashhmavi/Lead-generator.git
+cd Lead-generator
 ```
 
 2. Create a virtual environment:
@@ -59,27 +61,3 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 
 [MIT](https://choosealicense.com/licenses/mit/)
 ```
-
-Key improvements made:
-
-1. **Secrets Management**: API key now read from Streamlit secrets
-2. **Enhanced UI**:
-   - Modern tabbed interface
-   - Improved visual hierarchy
-   - Feature highlights
-   - Better error handling
-   - Consistent branding
-3. **Streamlined Workflow**:
-   - Automatic API key validation
-   - Clear instructions for setup
-   - Better progress indicators
-4. **Code Structure**:
-   - Separated concerns into functions
-   - Improved error handling
-   - Better type checking
-
-To use this:
-
-1. Create `.streamlit/secrets.toml` with your Groq API key
-2. Install requirements with `pip install -r requirements.txt`
-3. Run with `streamlit run app.py`
