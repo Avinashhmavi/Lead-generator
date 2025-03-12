@@ -1,284 +1,184 @@
 import streamlit as st
 import pandas as pd
 from xgboost import XGBRegressor
-import pickle
 from openai import OpenAI
 import json
 import time
+import os
 
-# Load the trained XGBoost model
-with open('xgb_model.pkl', 'rb') as file:
-    xgb_model = pickle.load(file)
-
-# Groq Configuration
+# --- Configuration ---
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_MODEL = "mixtral-8x7b-32768"
 MAX_TOKENS = 3000
-BATCH_SIZE = 5
-RETRY_DELAY = 10
+BATCH_SIZE = 3  # Reduced for reliability
+RETRY_DELAY = 15  # Increased for safety
 MAX_RETRIES = 3
 
-# --- Groq API Functions ---
-def validate_api_key(api_key):
+# --- XGBoost Model Handling ---
+def load_xgb_model():
     try:
-        client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
-        client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "user", "content": "API test"}],
-            max_tokens=5,
-        )
-        return True
+        model = XGBRegressor()
+        model.load_model("xgb_model.json")  # Using native XGBoost format
+        return model
     except Exception as e:
-        st.error(f"Groq API Error: {str(e)}")
-        return False
-
-def get_groq_response(messages, api_key, retry_count=0):
-    try:
-        client = OpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=MAX_TOKENS,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        if "rate_limit_exceeded" in str(e) and retry_count < MAX_RETRIES:
-            st.warning(f"Rate limit exceeded - waiting {RETRY_DELAY} seconds...")
-            time.sleep(RETRY_DELAY)
-            return get_groq_response(messages, api_key, retry_count + 1)
-        st.error(f"Groq API Error: {str(e)}")
+        st.error(f"Model loading failed: {str(e)}")
         return None
 
-# --- Lead Processing Functions ---
-def process_leads(df):
-    leads_data = df.to_dict("records")
-    batches = [leads_data[i:i + BATCH_SIZE] 
-              for i in range(0, len(leads_data), BATCH_SIZE)]
+# --- Groq API Functions ---
+def get_groq_client(api_key):
+    return OpenAI(api_key=api_key, base_url=GROQ_BASE_URL)
 
-    prompts = []
-    for batch in batches:
-        formatted_leads = json.dumps(batch, indent=2)
-        prompt = f"""Analyze these {len(batch)} leads using:
-        - Channel Presence (0-50)
-        - Professional Experience (0-50)
-        - Career Motivation (0-30)
-        - Geography (0-30)
+def safe_groq_call(client, messages):
+    for _ in range(MAX_RETRIES):
+        try:
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=MAX_TOKENS,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            if "rate_limit_exceeded" in str(e):
+                time.sleep(RETRY_DELAY)
+                continue
+            st.error(f"API Error: {str(e)}")
+            return None
+    return None
 
-        Output table with columns:
-        | Full Name | Preferred Name | Email | Lead Score | Reason | LinkedIn | Motivation |
+# --- Core Processing Functions ---
+def process_leads_safely(df):
+    try:
+        batches = [df[i:i+BATCH_SIZE].to_dict('records') 
+                 for i in range(0, len(df), BATCH_SIZE)]
+        return batches
+    except Exception as e:
+        st.error(f"Data processing error: {str(e)}")
+        return []
 
-        Lead Data:
-        {formatted_leads}"""
-        prompts.append(prompt)
-    return prompts
+def generate_analysis_prompt(batch):
+    return f"""Analyze these marketing leads. For each lead, provide:
+    - Lead Score (0-100)
+    - Primary Strength
+    - Recommended Action
+    - Confidence Level (High/Medium/Low)
 
-def process_in_batches(prompts, api_key):
-    results = []
-    for i, prompt in enumerate(prompts):
-        messages = [
-            {"role": "system", "content": "Expert lead scoring analyst."},
-            {"role": "user", "content": prompt}
-        ]
-        response = get_groq_response(messages, api_key)
-        if response:
-            results.append(response)
-            if i < len(prompts) - 1:
-                time.sleep(1)
-    return "\n\n".join(results)
+    Input Data:
+    {json.dumps(batch, indent=2)}
 
-def parse_lead_data(input_text):
-    lines = input_text.strip().split('\n')
-    leads = []
-    columns = ['Full Name', 'Preferred Name', 'Email', 'Lead Score', 
-              'Reason', 'LinkedIn', 'Motivation']
-    for line in lines:
-        parts = line.split('\t') if '\t' in line else line.split(',')
-        if len(parts) == len(columns):
-            lead_dict = dict(zip(columns, [p.strip() for p in parts]))
-            leads.append(lead_dict)
-    return leads
+    Format response as markdown table with columns:
+    | Name | Email | Score | Strength | Action | Confidence |"""
 
-def generate_personalized_emails(leads_data, api_key):
-    messages = [
-        {
-            "role": "system",
-            "content": "Expert email writer for professional courses. Create: "
-                       "- Personalized emails using provided lead data "
-                       "- Focus on individual motivations "
-                       "- Professional but friendly tone "
-                       "- Include email address and preferred name"
-        },
-        {
-            "role": "user",
-            "content": f"Generate emails for these leads:\n"
-                       f"{json.dumps(leads_data, indent=2)}\n"
-                       f"Close with warm regards from Karan"
-        }
-    ]
-    response = get_groq_response(messages, api_key)
-    return response if response else "Error generating emails"
+def parse_analysis_response(response):
+    try:
+        lines = [line.split('|') for line in response.split('\n') if '|' in line]
+        headers = [h.strip() for h in lines[0] if h]
+        return [dict(zip(headers, [cell.strip() for cell in row])) 
+               for row in lines[2:]]  # Skip header separator
+    except Exception as e:
+        st.error(f"Analysis parsing failed: {str(e)}")
+        return []
 
-# --- UI Components ---
-def show_features():
-    st.markdown("""
-    ## 🌟 Lead Analysis Features
-    - **🚀 Real-time Lead Scoring** with multi-dimensional analysis
-    - **📧 Personalized Email Generation** based on lead motivations
-    - **📊 Batch Processing** with automatic rate limiting
-    - **📥 Easy CSV/Excel Import** for lead data
-    - **📤 Downloadable Reports** in markdown format
-    """)
+# --- UI Configuration ---
+def configure_sidebar():
+    with st.sidebar:
+        st.title("📈 Business Analytics Suite")
+        st.markdown("---")
+        st.subheader("Key Features")
+        st.markdown("""
+        - 🚀 AI-Powered Sales Predictions
+        - 📊 Intelligent Lead Scoring
+        - 📧 Personalized Email Generation
+        - 🔒 Secure Cloud Processing
+        """)
+        
+        if 'groq' not in st.secrets:
+            st.error("Groq API key missing!")
+            st.markdown("Add to `.streamlit/secrets.toml`:")
+            st.code("[groq]\napi_key = 'your-key-here'")
 
-# --- Main App ---
+# --- Main Application ---
 def main():
     st.set_page_config(
-        page_title="Business Analytics Suite",
-        page_icon="📈",
+        page_title="Business Analytics Pro",
         layout="wide",
         initial_sidebar_state="expanded"
     )
-
-    # Custom CSS
-    st.markdown("""
-    <style>
-        body {
-            background-color: #f4f4f4;
-        }
-        .main {
-            max-width: 1200px;
-            margin: auto;
-            padding: 20px;
-        }
-        h1 {
-            color: #0066cc;
-        }
-        .btn-primary {
-            background-color: #0066cc;
-            color: #ffffff;
-        }
-        .btn-primary:hover {
-            background-color: #0050a5;
-        }
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 10px;
-        }
-        .stTabs [data-baseweb="tab"] {
-            height: 50px;
-            padding: 0 25px;
-            background-color: #F0F2F6;
-            border-radius: 5px 5px 0px 0px;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-
-    # Sidebar Configuration
-    with st.sidebar:
-        st.title("🚀 Analytics Tools")
-        st.markdown("---")
-        show_features()
-        if 'groq' not in st.secrets or not st.secrets.groq.get('api_key'):
-            st.error("⛔ Groq API Key Missing")
-            st.markdown("1. Go to [Groq Console](https://console.groq.com/keys)")
-            st.markdown("2. Create an API key")
-            st.markdown("3. Add to `.streamlit/secrets.toml`:")
-            st.code("""
-            [groq]
-            api_key = "your_api_key_here"
-            """)
-        else:
-            st.success("✅ Groq API Key Configured")
-        st.markdown("---")
-        st.warning(f"API Limits:\n- Max {BATCH_SIZE} leads/batch\n- {MAX_TOKENS} tokens/request")
-
-    # Main Tabs
-    tab1, tab2 = st.tabs(["📈 Sales Predictor", "📊 Lead Analyzer"])
-
+    
+    # Load components
+    configure_sidebar()
+    xgb_model = load_xgb_model()
+    
+    # Main tabs
+    tab1, tab2 = st.tabs(["💰 Sales Predictor", "📈 Lead Analyzer"])
+    
     # Sales Prediction Tab
     with tab1:
         st.header("Sales Prediction Engine")
-        tv = st.text_input("TV Ad Spend ($)", "")
-        radio = st.text_input("Radio Ad Spend ($)", "")
-        newspaper = st.text_input("Newspaper Ad Spend ($)", "")
-
-        if st.button("Predict Sales", type="primary"):
-            try:
-                prediction = xgb_model.predict([[float(tv), float(radio), float(newspaper)]])
-                st.success(f"Predicted Sales: ${prediction[0]:.2f}")
-            except ValueError:
-                st.error("Please enter valid numerical values")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            tv = st.number_input("TV Budget ($)", min_value=0.0, value=1000.0)
+            radio = st.number_input("Radio Budget ($)", min_value=0.0, value=500.0)
+        
+        with col2:
+            newspaper = st.number_input("Newspaper Budget ($)", min_value=0.0, value=200.0)
+            if st.button("Predict Sales", type="primary"):
+                if xgb_model:
+                    try:
+                        prediction = xgb_model.predict([[tv, radio, newspaper]])
+                        st.success(f"Projected Sales: ${prediction[0]:.2f}")
+                    except Exception as e:
+                        st.error(f"Prediction failed: {str(e)}")
+                else:
+                    st.error("Model not available")
 
     # Lead Analysis Tab
     with tab2:
-        st.header("Lead Analysis Platform")
-        subtab1, subtab2 = st.tabs(["📋 Lead Scoring", "✉️ Email Generator"])
-
-        with subtab1:
-            uploaded_file = st.file_uploader(
-                "Upload Lead Data (CSV/Excel)", 
-                type=["csv", "xlsx"],
-                help="File should contain lead contact info and professional details"
-            )
-            
+        st.header("AI Lead Analysis")
+        sub1, sub2 = st.tabs(["🔍 Analyze Leads", "📧 Generate Emails"])
+        
+        with sub1:
+            uploaded_file = st.file_uploader("Upload Leads CSV", type=["csv"])
             if uploaded_file:
                 try:
-                    df = pd.read_csv(uploaded_file) if uploaded_file.type == "text/csv" else pd.read_excel(uploaded_file)
+                    df = pd.read_csv(uploaded_file)
                     st.success(f"Loaded {len(df)} leads")
                     
-                    if st.button("Start Analysis", type="primary"):
-                        if 'groq' not in st.secrets or not st.secrets.groq.get('api_key'):
-                            st.error("Groq API key required for analysis")
+                    if st.button("Analyze Leads", type="primary"):
+                        if 'groq' not in st.secrets:
+                            st.error("Groq API key required")
                             return
-                        
-                        with st.spinner("Analyzing leads..."):
-                            prompts = process_leads(df)
-                            response = process_in_batches(prompts, st.secrets.groq.api_key)
                             
-                            if response:
+                        client = get_groq_client(st.secrets.groq.api_key)
+                        batches = process_leads_safely(df)
+                        
+                        with st.spinner("Analyzing..."):
+                            results = []
+                            for batch in batches:
+                                prompt = generate_analysis_prompt(batch)
+                                response = safe_groq_call(client, [
+                                    {"role": "system", "content": "Expert lead analyst"},
+                                    {"role": "user", "content": prompt}
+                                ])
+                                if response:
+                                    results.extend(parse_analysis_response(response))
+                            
+                            if results:
                                 st.subheader("Analysis Results")
-                                st.markdown(response)
+                                st.write(pd.DataFrame(results))
                                 st.download_button(
-                                    label="Download Report",
-                                    data=response,
-                                    file_name="lead_scores.md",
-                                    mime="text/markdown"
+                                    label="Download Results",
+                                    data=pd.DataFrame(results).to_csv(index=False),
+                                    file_name="lead_analysis.csv"
                                 )
                 except Exception as e:
-                    st.error(f"File processing error: {str(e)}")
-
-        with subtab2:
-            lead_input = st.text_area(
-                "Paste Lead Analysis Results", 
-                height=300,
-                placeholder="Paste tab/comma separated data with columns: Full Name, Preferred Name, Email, Lead Score, Reason, LinkedIn, Motivation"
-            )
-            
-            if st.button("Generate Emails", type="primary"):
-                if not lead_input.strip():
-                    st.warning("Please input lead data first")
-                    return
-                
-                if 'groq' not in st.secrets or not st.secrets.groq.get('api_key'):
-                    st.error("Groq API key required for email generation")
-                    return
-                
-                with st.spinner("Generating personalized emails..."):
-                    leads_data = parse_lead_data(lead_input)
-                    
-                    if leads_data:
-                        emails = generate_personalized_emails(leads_data, st.secrets.groq.api_key)
-                        
-                        if emails:
-                            st.subheader("Generated Emails")
-                            st.markdown(emails)
-                            st.download_button(
-                                label="Download Emails",
-                                data=emails,
-                                file_name="personalized_emails.md",
-                                mime="text/markdown"
-                            )
-                    else:
-                        st.error("Invalid input format")
+                    st.error(f"File error: {str(e)}")
+        
+        with sub2:
+            if 'analysis_results' in st.session_state:
+                emails = generate_personalized_emails(st.session_state.analysis_results)
+                st.write(emails)
 
 if __name__ == "__main__":
     main()
